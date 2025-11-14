@@ -28,6 +28,14 @@ if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
     if [ -f "db_connection.txt" ]; then
         echo "Or use: $(cat db_connection.txt)"
     fi
+
+    # Apply schema if server is running
+    if [ -f "startup.sql" ]; then
+        echo "Applying startup.sql to ensure schema is up to date (idempotent)..."
+        sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -f startup.sql || {
+            echo "⚠ Failed to apply startup.sql on running server"; 
+        }
+    fi
     
     echo ""
     echo "Script stopped - server already running."
@@ -42,6 +50,15 @@ if pgrep -f "postgres.*-p ${DB_PORT}" > /dev/null 2>&1; then
     # Try to connect and verify the database exists
     if sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -c '\q' 2>/dev/null; then
         echo "Database ${DB_NAME} is accessible."
+
+        # Apply schema if accessible
+        if [ -f "startup.sql" ]; then
+            echo "Applying startup.sql to ensure schema is up to date (idempotent)..."
+            sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -f startup.sql || {
+                echo "⚠ Failed to apply startup.sql on running server"; 
+            }
+        fi
+
         echo "Script stopped - server already running."
         exit 0
     fi
@@ -62,14 +79,20 @@ echo "Waiting for PostgreSQL to start..."
 sleep 5
 
 # Check if PostgreSQL is running
+READY=0
 for i in {1..15}; do
     if sudo -u postgres ${PG_BIN}/pg_isready -p ${DB_PORT} > /dev/null 2>&1; then
         echo "PostgreSQL is ready!"
+        READY=1
         break
     fi
     echo "Waiting... ($i/15)"
     sleep 2
 done
+
+if [ "$READY" -ne 1 ]; then
+    echo "⚠ PostgreSQL did not become ready in time"
+fi
 
 # Create database and user
 echo "Setting up database and user..."
@@ -106,10 +129,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO ${DB_USER};
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO ${DB_USER};
 
--- If you want the user to be able to create objects without restrictions,
--- you can make them the owner of the public schema (optional but effective)
--- ALTER SCHEMA public OWNER TO ${DB_USER};
-
 -- Alternative: Grant all privileges on schema public to the user
 GRANT ALL ON SCHEMA public TO ${DB_USER};
 
@@ -128,6 +147,16 @@ GRANT CREATE ON SCHEMA public TO ${DB_USER};
 -- Show current permissions for debugging
 \dn+ public
 EOF
+
+# Apply schema file after DB is ready and permissions are set
+if [ -f "startup.sql" ]; then
+    echo "Applying startup.sql (idempotent schema creation)..."
+    sudo -u postgres ${PG_BIN}/psql -p ${DB_PORT} -d ${DB_NAME} -f startup.sql || {
+        echo "⚠ Failed to apply startup.sql"
+    }
+else
+    echo "No startup.sql found to apply."
+fi
 
 # Save connection command to a file
 echo "psql postgresql://${DB_USER}:${DB_PASSWORD}@localhost:${DB_PORT}/${DB_NAME}" > db_connection.txt
